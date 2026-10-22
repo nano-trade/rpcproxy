@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -20,7 +22,12 @@ var version = "dev"
 func main() {
 	configPath := flag.String("config", "config.json", "path to the JSON config file")
 	check := flag.Bool("check", false, "validate the config and exit")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("rpcproxy %s (%s)\n", version, runtime.Version())
+		return
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 	cfg, err := loadConfig(*configPath)

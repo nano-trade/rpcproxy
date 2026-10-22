@@ -1,6 +1,6 @@
 {
   "network": "banano",
-  "listen": "localhost:9950",
+  "listen": "localhost:9970",
   "request_path": "/proxy",
   "node_rpc_url": "http://[::1]:7072",
   "trusted_proxies": [
@@ -51,7 +51,7 @@
     "version"
   ],
   "cached_actions": {
-    "block_count": 30,
+    "block_count": 1,
     "available_supply": 3600,
     "active_difficulty": 30,
     "representatives_online": 300
@@ -76,13 +76,13 @@
   "cors_origins": [],
   "node_headers": {},
   "blocked_accounts": [],
-  "metrics_listen": "localhost:9958",
+  "metrics_listen": "localhost:9978",
   "price_url": "https://prices.banano.trade/api/data",
   "price_cache_seconds": 30,
   "ip_blocklist": [],
   "log_requests": false,
   "websocket": {
-    "listen": "localhost:9952",
+    "listen": "localhost:9972",
     "node_url": "ws://[::1]:7079",
     "max_connections": 5000,
     "max_connections_per_ip": 20,

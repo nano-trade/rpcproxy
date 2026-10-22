@@ -53,7 +53,8 @@ Then:
 ```sh
 rpcproxy -check -config config.banano.json   # validate
 rpcproxy -config config.banano.json
-curl 'http://localhost:9950/proxy?action=block_count'
+curl 'http://localhost:9970/proxy?action=block_count'
+rpcproxy -version
 ```
 
 ### As a service (Linux, systemd)
@@ -85,9 +86,25 @@ just like a normal install. The image has no shell and runs as a non-root user.
 
 See [`deploy/nginx-example.conf`](deploy/nginx-example.conf). nginx must pass
 `X-Real-IP`, otherwise every visitor shares one rate limit.
-[`deploy/update-cloudflare-ips`](deploy/update-cloudflare-ips) generates the
-nginx config that restores visitor IPs from Cloudflare and lets you refuse
-requests that try to skip Cloudflare.
+
+[`deploy/update-cloudflare-ips`](deploy/update-cloudflare-ips) builds the
+nginx config from Cloudflare's published IP ranges:
+
+- **Default (per site):** `conf.d/rpcproxy-cloudflare-geo.conf` defines
+  `$via_cloudflare`, and `snippets/rpcproxy-cloudflare-realip.conf` restores the
+  visitor IP. Only the server blocks that `include` the snippet are affected.
+- **`--global`:** one `conf.d/cloudflare.conf` that restores visitor IPs for
+  every site on the server.
+
+It never overwrites a file it didn't generate, keeps the old files if the
+download fails, and rolls back if `nginx -t` fails. Install it with the timer
+for weekly refreshes:
+
+```sh
+install -m 755 deploy/update-cloudflare-ips /usr/local/sbin/
+install -m 644 deploy/update-cloudflare-ips.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now update-cloudflare-ips.timer
+```
 
 ## Using it
 
@@ -132,8 +149,8 @@ Every reply includes the `id` you sent, if any.
 
 ### Metrics
 
-Set `metrics_listen` (e.g. `localhost:9958`) and scrape
-`http://localhost:9958/metrics` with Prometheus. It covers requests by action and
+Set `metrics_listen` (e.g. `localhost:9978`) and scrape
+`http://localhost:9978/metrics` with Prometheus. It covers requests by action and
 result, node latency per action, cache hits, websocket clients, subscriptions,
 forwarded messages and whether the node websocket is up. Keep this port private;
 it is never served on the public RPC port.
@@ -152,7 +169,7 @@ Unknown keys are rejected, so typos are caught at startup.
 | `trusted_proxies` | IPs or CIDRs allowed to set `real_ip_header` |
 | `real_ip_header` | Header carrying the visitor IP (default `X-Real-IP`) |
 | `allowed_actions` | RPC actions passed to the node |
-| `cached_actions` | Action → seconds to cache. Identical requests share an entry and concurrent ones are merged |
+| `cached_actions` | Action → seconds to cache. Identical requests share an entry and concurrent ones are merged. Keep `block_count` at 1–2 s: some clients rank nodes by block count |
 | `limited_actions` | Action → maximum `count` (missing or larger values are capped) |
 | `blocked_accounts` | Requests whose `account` or `accounts` name one of these get `403` |
 | `max_array_items` | Max items in any array parameter |
@@ -175,7 +192,9 @@ Unknown keys are rejected, so typos are caught at startup.
 
 ## Coming from NanoRPCProxy
 
-Most clients need no change. Differences:
+Most clients need no change. The example configs use different ports
+(Banano 9970/9972, Nano 9980/9982) than NanoRPCProxy's 9950/9952, so both can
+run side by side while you switch nginx over. Differences:
 
 - Websocket subscriptions are tracked per connection. NanoRPCProxy tracks them
   per IP, which mixes up users behind the same IP, and behind nginx or
@@ -187,6 +206,8 @@ Most clients need no change. Differences:
   work delegation and the daily stats file. `work_generate` can still be
   allowlisted and is then handled by the node. `disable_watch_work` is accepted
   but ignored, since nodes ignore `watch_work` since V22.
+- `verified_accounts` is not supported. NanoRPCProxy fetched it from the
+  mynano.ninja API, which no longer responds; requests for it get `403`.
 
 ## Development
 

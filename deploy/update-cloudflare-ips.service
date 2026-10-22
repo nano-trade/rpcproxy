@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh Cloudflare IP ranges for nginx
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# per-site mode; add --global to restore visitor IPs for every site instead
+ExecStart=/usr/local/sbin/update-cloudflare-ips

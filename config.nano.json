@@ -1,6 +1,6 @@
 {
   "network": "nano",
-  "listen": "localhost:9960",
+  "listen": "localhost:9980",
   "request_path": "/proxy",
   "node_rpc_url": "http://[::1]:7076",
   "trusted_proxies": [
@@ -50,7 +50,7 @@
     "version"
   ],
   "cached_actions": {
-    "block_count": 30,
+    "block_count": 1,
     "available_supply": 3600,
     "active_difficulty": 30,
     "representatives_online": 300
@@ -77,13 +77,13 @@
   "blocked_accounts": [
     "nano_1111111111111111111111111111111111111111111111111111hifc8npp"
   ],
-  "metrics_listen": "localhost:9968",
+  "metrics_listen": "localhost:9988",
   "price_url": "",
   "price_cache_seconds": 30,
   "ip_blocklist": [],
   "log_requests": false,
   "websocket": {
-    "listen": "localhost:9962",
+    "listen": "localhost:9982",
     "node_url": "ws://[::1]:7078",
     "max_connections": 5000,
     "max_connections_per_ip": 20,

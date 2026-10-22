@@ -77,7 +77,7 @@ type Config struct {
 func defaultConfig() Config {
 	return Config{
 		Network:               "banano",
-		Listen:                "127.0.0.1:9950",
+		Listen:                "127.0.0.1:9970",
 		RequestPath:           "/proxy",
 		NodeRPCURL:            "http://[::1]:7072",
 		TrustedProxies:        []string{"127.0.0.1/32", "::1/128"},

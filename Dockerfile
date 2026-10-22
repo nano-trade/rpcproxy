@@ -11,6 +11,6 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /rpcproxy /usr/local/bin/rpcproxy
 COPY config.banano.json /etc/rpcproxy/config.json
 USER nonroot:nonroot
-EXPOSE 9950 9952 9958
+EXPOSE 9970 9972 9978
 ENTRYPOINT ["/usr/local/bin/rpcproxy"]
 CMD ["-config", "/etc/rpcproxy/config.json"]
