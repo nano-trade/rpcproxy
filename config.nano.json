@@ -1,6 +1,6 @@
 {
   "network": "nano",
-  "listen": "127.0.0.1:9960",
+  "listen": "localhost:9960",
   "request_path": "/proxy",
   "node_rpc_url": "http://[::1]:7076",
   "trusted_proxies": [
@@ -73,7 +73,7 @@
   "ip_blocklist": [],
   "log_requests": false,
   "websocket": {
-    "listen": "127.0.0.1:9962",
+    "listen": "localhost:9962",
     "node_url": "ws://[::1]:7078",
     "max_connections": 5000,
     "max_connections_per_ip": 20,

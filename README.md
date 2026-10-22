@@ -81,7 +81,7 @@ bypass Cloudflare). nginx must send `X-Real-IP`.
 | Key | Meaning |
 |---|---|
 | `network` | `banano` or `nano`: address prefixes and unit size |
-| `listen` | RPC listen address, keep it on localhost behind nginx |
+| `listen` | RPC listen address, keep it on localhost behind nginx (`localhost:port` binds both 127.0.0.1 and ::1) |
 | `request_path` | URL path for RPC (default `/proxy`) |
 | `node_rpc_url` | node RPC, e.g. `http://[::1]:7072` (Banano) / `:7076` (Nano) |
 | `trusted_proxies` | IPs/CIDRs allowed to set `real_ip_header` |

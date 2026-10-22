@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,13 +38,13 @@ func main() {
 
 	limiter := newRateLimiter(cfg.RateLimit.PerSecond, cfg.RateLimit.Burst)
 	proxy := newProxy(cfg, limiter)
-	servers := []*http.Server{newServer(cfg.Listen, proxy.routes())}
+	servers := newServers(cfg.Listen, proxy.routes())
 
 	var hub *Hub
 	if cfg.WS.Listen != "" {
 		hub = newHub(cfg, limiter)
 		go hub.runNode(ctx)
-		servers = append(servers, newServer(cfg.WS.Listen, hub))
+		servers = append(servers, newServers(cfg.WS.Listen, hub)...)
 	}
 
 	slog.Info("starting", "version", version, "network", cfg.Network, "rpc", cfg.Listen,
@@ -72,6 +73,16 @@ func main() {
 	for _, s := range servers {
 		s.Shutdown(sctx)
 	}
+}
+
+// newServers binds "localhost:port" on both 127.0.0.1 and ::1, so a proxy
+// in front that resolves localhost to either address always connects.
+func newServers(addr string, h http.Handler) []*http.Server {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host != "localhost" {
+		return []*http.Server{newServer(addr, h)}
+	}
+	return []*http.Server{newServer("127.0.0.1:"+port, h), newServer("[::1]:"+port, h)}
 }
 
 func newServer(addr string, h http.Handler) *http.Server {

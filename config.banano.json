@@ -1,6 +1,6 @@
 {
   "network": "banano",
-  "listen": "127.0.0.1:9950",
+  "listen": "localhost:9950",
   "request_path": "/proxy",
   "node_rpc_url": "http://[::1]:7072",
   "trusted_proxies": [
@@ -74,7 +74,7 @@
   "ip_blocklist": [],
   "log_requests": false,
   "websocket": {
-    "listen": "127.0.0.1:9952",
+    "listen": "localhost:9952",
     "node_url": "ws://[::1]:7079",
     "max_connections": 5000,
     "max_connections_per_ip": 20,
