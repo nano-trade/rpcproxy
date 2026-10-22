@@ -115,3 +115,7 @@ Unknown keys are rejected, so typos are caught at startup.
 ```
 removes all accounts (or only those given in `options.accounts`).
 `{"action":"ping"}` → `{"ack":"pong","time":...}`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
