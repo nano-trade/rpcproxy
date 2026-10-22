@@ -50,6 +50,7 @@ Requires Go 1.26+.
 
 ```sh
 go test -race ./...
+go install github.com/nano-trade/rpcproxy@latest   # or build from a clone:
 go build -trimpath -ldflags "-s -w -X main.version=1.0.0" -o rpcproxy .
 ```
 

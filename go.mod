@@ -1,4 +1,4 @@
-module rpcproxy
+module github.com/nano-trade/rpcproxy
 
 go 1.26.0
 
