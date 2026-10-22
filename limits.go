@@ -28,22 +28,25 @@ func newRateLimiter(rate, burst float64) *rateLimiter {
 	return rl
 }
 
-func (rl *rateLimiter) allow(key string, cost float64) bool {
+// allow takes cost tokens from key's bucket. It also reports how many tokens
+// are left and how long until the bucket is full again, for rate-limit headers.
+func (rl *rateLimiter) allow(key string, cost float64) (ok bool, remaining float64, reset time.Duration) {
 	now := time.Now()
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	b, ok := rl.buckets[key]
-	if !ok {
+	b, found := rl.buckets[key]
+	if !found {
 		b = &bucket{tokens: rl.burst, last: now}
 		rl.buckets[key] = b
 	}
 	b.tokens = min(rl.burst, b.tokens+now.Sub(b.last).Seconds()*rl.rate)
 	b.last = now
-	if b.tokens < cost {
-		return false
+	if b.tokens >= cost {
+		b.tokens -= cost
+		ok = true
 	}
-	b.tokens -= cost
-	return true
+	reset = time.Duration((rl.burst - b.tokens) / rl.rate * float64(time.Second))
+	return ok, b.tokens, reset
 }
 
 // cleanup drops buckets that have been idle long enough to be full again.

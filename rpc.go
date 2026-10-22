@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -33,12 +34,14 @@ type Proxy struct {
 	cache   *cache
 	sem     chan struct{}
 	stats   stats
+	metrics *metrics
 }
 
-func newProxy(cfg *Config, limiter *rateLimiter) *Proxy {
+func newProxy(cfg *Config, limiter *rateLimiter, m *metrics) *Proxy {
 	return &Proxy{
 		cfg:     cfg,
 		limiter: limiter,
+		metrics: m,
 		cache:   newCache(),
 		sem:     make(chan struct{}, cfg.MaxConcurrentRequests),
 		client: &http.Client{
@@ -95,6 +98,7 @@ func (p *Proxy) securityHeaders(next http.Handler) http.Handler {
 			}
 			h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			h.Set("Access-Control-Allow-Headers", "Content-Type")
+			h.Set("Access-Control-Expose-Headers", "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After")
 			h.Set("Access-Control-Max-Age", "86400")
 		}
 		if r.Method == http.MethodOptions {
@@ -109,8 +113,9 @@ func (p *Proxy) handleRPC(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	p.stats.requests.Add(1)
 	ip := clientIP(r, p.cfg)
-	action, status := "", http.StatusOK
+	action, status, result := "", http.StatusOK, resultOK
 	defer func() {
+		p.metrics.request(p.actionLabel(action), result)
 		if p.cfg.LogRequests {
 			slog.Info("rpc", "ip", ip.String(), "action", action, "status", status, "ms", time.Since(start).Milliseconds())
 		}
@@ -125,11 +130,13 @@ func (p *Proxy) handleRPC(w http.ResponseWriter, r *http.Request) {
 		switch status {
 		case http.StatusTooManyRequests:
 			p.stats.rateLimited.Add(1)
-			w.Header().Set("Retry-After", "1")
+			result = resultRateLimited
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			p.stats.nodeErrors.Add(1)
+			result = resultNodeError
 		default:
 			p.stats.rejected.Add(1)
+			result = resultRejected
 		}
 		writeJSON(w, status, map[string]string{"error": err.Error()})
 	}
@@ -138,7 +145,9 @@ func (p *Proxy) handleRPC(w http.ResponseWriter, r *http.Request) {
 		fail(errorf(http.StatusForbidden, "IP has been blocked"))
 		return
 	}
-	if !p.limiter.allow(ip.String(), 1) {
+	ok, remaining, reset := p.limiter.allow(ip.String(), 1)
+	setRateLimitHeaders(w.Header(), p.cfg.RateLimit, remaining, reset)
+	if !ok {
 		fail(errorf(http.StatusTooManyRequests, "You are making requests too fast, please slow down!"))
 		return
 	}
@@ -156,6 +165,51 @@ func (p *Proxy) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+// setRateLimitHeaders tells clients their budget, like NanoRPCProxy did.
+// Limit is the burst size, Reset the seconds until the bucket is full again.
+func setRateLimitHeaders(h http.Header, rl RateLimit, remaining float64, reset time.Duration) {
+	h.Set("X-RateLimit-Limit", strconv.Itoa(int(rl.Burst)))
+	h.Set("X-RateLimit-Remaining", strconv.Itoa(int(remaining)))
+	h.Set("X-RateLimit-Reset", strconv.Itoa(int(math.Ceil(reset.Seconds()))))
+	if remaining < 1 {
+		h.Set("Retry-After", strconv.Itoa(int(math.Ceil((1-remaining)/rl.PerSecond))))
+	}
+}
+
+// actionLabel keeps the metrics label set bounded to the allowlist.
+func (p *Proxy) actionLabel(action string) string {
+	if p.cfg.allowed[action] {
+		return action
+	}
+	if action == "" {
+		return "_none"
+	}
+	return "_other"
+}
+
+// mentionsBlockedAccount reports whether the request's account or accounts
+// parameter names an account from blocked_accounts.
+func (p *Proxy) mentionsBlockedAccount(params map[string]any) bool {
+	if len(p.cfg.blockedAccounts) == 0 {
+		return false
+	}
+	check := func(v any) bool {
+		s, ok := v.(string)
+		return ok && p.cfg.blockedAccounts[p.cfg.net.canonical(strings.ToLower(s))]
+	}
+	if check(params["account"]) {
+		return true
+	}
+	if arr, ok := params["accounts"].([]any); ok {
+		for _, v := range arr {
+			if check(v) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseParams reads GET query parameters or a JSON POST body.
@@ -218,6 +272,9 @@ func (p *Proxy) dispatch(ctx context.Context, action string, params map[string]a
 			return nil, errorf(http.StatusBadRequest, "Too many items in %s (max %d)", k, p.cfg.MaxArrayItems)
 		}
 	}
+	if p.mentionsBlockedAccount(params) {
+		return nil, errorf(http.StatusForbidden, "Account not allowed")
+	}
 
 	switch action {
 	case "price":
@@ -248,10 +305,6 @@ func (p *Proxy) dispatch(ctx context.Context, action string, params map[string]a
 			params["count"] = strconv.Itoa(max)
 		}
 	}
-	if action == "process" && p.cfg.DisableWatchWork {
-		params["watch_work"] = "false"
-	}
-
 	if ttl, ok := p.cfg.CachedActions[action]; ok && ttl > 0 {
 		key, _ := json.Marshal(sortedParams(params))
 		body, hit, err := p.cache.get(string(key), time.Duration(ttl)*time.Second, func() ([]byte, bool, error) {
@@ -263,6 +316,7 @@ func (p *Proxy) dispatch(ctx context.Context, action string, params map[string]a
 		})
 		if hit {
 			p.stats.cacheHits.Add(1)
+			p.metrics.add(&p.metrics.cacheHits)
 		}
 		return body, err
 	}
@@ -297,8 +351,14 @@ func (p *Proxy) callNode(ctx context.Context, params map[string]any) ([]byte, er
 		return nil, errorf(http.StatusBadRequest, "Invalid parameters")
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.NodeRPCURL, bytes.NewReader(payload))
+	for k, v := range p.cfg.NodeHeaders {
+		req.Header.Set(k, v)
+	}
 	req.Header.Set("Content-Type", "application/json")
+	start := time.Now()
 	resp, err := p.client.Do(req)
+	action, _ := params["action"].(string)
+	p.metrics.nodeCall(action, time.Since(start))
 	if err != nil {
 		slog.Warn("node request failed", "err", err)
 		return nil, errorf(http.StatusBadGateway, "Node unavailable")
@@ -341,6 +401,7 @@ func (p *Proxy) price() ([]byte, error) {
 	})
 	if hit {
 		p.stats.cacheHits.Add(1)
+		p.metrics.add(&p.metrics.cacheHits)
 	}
 	return body, err
 }

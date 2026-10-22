@@ -37,18 +37,26 @@ func main() {
 	defer stop()
 
 	limiter := newRateLimiter(cfg.RateLimit.PerSecond, cfg.RateLimit.Burst)
-	proxy := newProxy(cfg, limiter)
+	m := newMetrics()
+	proxy := newProxy(cfg, limiter, m)
 	servers := newServers(cfg.Listen, proxy.routes())
 
 	var hub *Hub
 	if cfg.WS.Listen != "" {
-		hub = newHub(cfg, limiter)
+		hub = newHub(cfg, limiter, m)
 		go hub.runNode(ctx)
 		servers = append(servers, newServers(cfg.WS.Listen, hub)...)
 	}
 
+	if cfg.MetricsListen != "" {
+		servers = append(servers, newServers(cfg.MetricsListen, m.handler(cfg, hub))...)
+	}
+	if cfg.DisableWatchWork != nil {
+		slog.Warn("disable_watch_work is obsolete (the node ignores watch_work since V22) and can be removed from the config")
+	}
+
 	slog.Info("starting", "version", version, "network", cfg.Network, "rpc", cfg.Listen,
-		"websocket", cfg.WS.Listen, "node", cfg.NodeRPCURL, "actions", len(cfg.AllowedActions))
+		"websocket", cfg.WS.Listen, "metrics", cfg.MetricsListen, "node", cfg.NodeRPCURL, "actions", len(cfg.AllowedActions))
 
 	errc := make(chan error, len(servers))
 	for _, s := range servers {

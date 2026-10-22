@@ -18,6 +18,7 @@
     "account_weight",
     "accounts_frontiers",
     "accounts_pending",
+    "accounts_receivable",
     "active_difficulty",
     "available_supply",
     "block_account",
@@ -34,7 +35,9 @@
     "frontiers",
     "key_create",
     "pending",
+    "receivable",
     "pending_exists",
+    "receivable_exists",
     "process",
     "representatives",
     "representatives_online",
@@ -56,7 +59,10 @@
     "account_history": 500,
     "chain": 500,
     "frontiers": 500,
-    "pending": 500
+    "pending": 500,
+    "receivable": 500,
+    "accounts_pending": 500,
+    "accounts_receivable": 500
   },
   "max_array_items": 500,
   "max_body_bytes": 262144,
@@ -67,7 +73,11 @@
     "burst": 40
   },
   "cors_origins": [],
-  "disable_watch_work": false,
+  "node_headers": {},
+  "blocked_accounts": [
+    "nano_1111111111111111111111111111111111111111111111111111hifc8npp"
+  ],
+  "metrics_listen": "localhost:9968",
   "price_url": "",
   "price_cache_seconds": 30,
   "ip_blocklist": [],

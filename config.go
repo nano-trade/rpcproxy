@@ -37,35 +37,41 @@ type WSConfig struct {
 }
 
 type Config struct {
-	Network               string         `json:"network"`
-	Listen                string         `json:"listen"`
-	RequestPath           string         `json:"request_path"`
-	NodeRPCURL            string         `json:"node_rpc_url"`
-	TrustedProxies        []string       `json:"trusted_proxies"`
-	RealIPHeader          string         `json:"real_ip_header"`
-	AllowedActions        []string       `json:"allowed_actions"`
-	CachedActions         map[string]int `json:"cached_actions"`  // action -> seconds
-	LimitedActions        map[string]int `json:"limited_actions"` // action -> max "count"
-	MaxArrayItems         int            `json:"max_array_items"`
-	MaxBodyBytes          int64          `json:"max_body_bytes"`
-	RPCTimeoutSeconds     int            `json:"rpc_timeout_seconds"`
-	MaxConcurrentRequests int            `json:"max_concurrent_node_requests"`
-	RateLimit             RateLimit      `json:"rate_limit"`
-	CORSOrigins           []string       `json:"cors_origins"` // empty = any origin
-	DisableWatchWork      bool           `json:"disable_watch_work"`
-	PriceURL              string         `json:"price_url"`
-	PriceCacheSeconds     int            `json:"price_cache_seconds"`
-	IPBlocklist           []string       `json:"ip_blocklist"`
-	LogRequests           bool           `json:"log_requests"`
-	WS                    WSConfig       `json:"websocket"`
+	Network               string            `json:"network"`
+	Listen                string            `json:"listen"`
+	RequestPath           string            `json:"request_path"`
+	NodeRPCURL            string            `json:"node_rpc_url"`
+	TrustedProxies        []string          `json:"trusted_proxies"`
+	RealIPHeader          string            `json:"real_ip_header"`
+	AllowedActions        []string          `json:"allowed_actions"`
+	CachedActions         map[string]int    `json:"cached_actions"`  // action -> seconds
+	LimitedActions        map[string]int    `json:"limited_actions"` // action -> max "count"
+	MaxArrayItems         int               `json:"max_array_items"`
+	MaxBodyBytes          int64             `json:"max_body_bytes"`
+	RPCTimeoutSeconds     int               `json:"rpc_timeout_seconds"`
+	MaxConcurrentRequests int               `json:"max_concurrent_node_requests"`
+	RateLimit             RateLimit         `json:"rate_limit"`
+	CORSOrigins           []string          `json:"cors_origins"` // empty = any origin
+	NodeHeaders           map[string]string `json:"node_headers"` // extra headers for the node, e.g. auth for a remote node
+	BlockedAccounts       []string          `json:"blocked_accounts"`
+	MetricsListen         string            `json:"metrics_listen"` // Prometheus /metrics, empty disables it
+	PriceURL              string            `json:"price_url"`
+	PriceCacheSeconds     int               `json:"price_cache_seconds"`
+	IPBlocklist           []string          `json:"ip_blocklist"`
+	LogRequests           bool              `json:"log_requests"`
+	WS                    WSConfig          `json:"websocket"`
+
+	// Deprecated: the node ignores watch_work since V22. Accepted so old configs still load.
+	DisableWatchWork *bool `json:"disable_watch_work,omitempty"`
 
 	// derived
-	net       Network
-	allowed   map[string]bool
-	trusted   []netip.Prefix
-	blocked   []netip.Prefix
-	anyOrigin bool
-	origins   map[string]bool
+	net             Network
+	allowed         map[string]bool
+	trusted         []netip.Prefix
+	blocked         []netip.Prefix
+	anyOrigin       bool
+	origins         map[string]bool
+	blockedAccounts map[string]bool
 }
 
 func defaultConfig() Config {
@@ -131,6 +137,13 @@ func (c *Config) prepare() error {
 	if c.blocked, err = parsePrefixes(c.IPBlocklist); err != nil {
 		return fmt.Errorf("ip_blocklist: %w", err)
 	}
+	c.blockedAccounts = map[string]bool{}
+	for _, a := range c.BlockedAccounts {
+		if !validAddress(a, c.net) {
+			return fmt.Errorf("blocked_accounts: %q is not a valid %s address", a, c.net.Name)
+		}
+		c.blockedAccounts[c.net.canonical(a)] = true
+	}
 	c.anyOrigin = len(c.CORSOrigins) == 0
 	c.origins = map[string]bool{}
 	for _, o := range c.CORSOrigins {
@@ -168,6 +181,14 @@ func parsePrefixes(list []string) ([]netip.Prefix, error) {
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
 	}
 	return out, nil
+}
+
+// canonical returns the address with the network's main prefix (nano_, not xrb_).
+func (n Network) canonical(addr string) string {
+	if i := strings.IndexByte(addr, '_'); i >= 0 && addr[:i+1] != n.Prefixes[0] {
+		return n.Prefixes[0] + addr[i+1:]
+	}
+	return addr
 }
 
 func (c *Config) originAllowed(origin string) bool {

@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/netip"
-	"strings"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,7 @@ const (
 type Hub struct {
 	cfg     *Config
 	limiter *rateLimiter
+	metrics *metrics
 
 	mu         sync.Mutex
 	clients    map[*wsClient]struct{}
@@ -40,8 +42,9 @@ type Hub struct {
 	pendingDel map[string]struct{}
 	notify     chan struct{}
 
-	nodeUp    atomic.Bool
-	forwarded atomic.Int64
+	nodeUp         atomic.Bool
+	forwarded      atomic.Int64 // reset by the 10-minute log line
+	forwardedTotal atomic.Int64 // for /metrics
 }
 
 type wsClient struct {
@@ -54,9 +57,9 @@ type wsClient struct {
 	once     sync.Once
 }
 
-func newHub(cfg *Config, limiter *rateLimiter) *Hub {
+func newHub(cfg *Config, limiter *rateLimiter, m *metrics) *Hub {
 	return &Hub{
-		cfg: cfg, limiter: limiter,
+		cfg: cfg, limiter: limiter, metrics: m,
 		clients:    map[*wsClient]struct{}{},
 		perIP:      map[netip.Addr]int{},
 		subs:       map[string]map[*wsClient]struct{}{},
@@ -71,16 +74,19 @@ func newHub(cfg *Config, limiter *rateLimiter) *Hub {
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, h.cfg)
 	if !ip.IsValid() || inPrefixes(ip, h.cfg.blocked) {
+		h.metrics.add(&h.metrics.wsRejected)
 		http.Error(w, "blocked", http.StatusForbidden)
 		return
 	}
-	if !h.limiter.allow(ip.String(), 1) {
+	if ok, _, _ := h.limiter.allow(ip.String(), 1); !ok {
+		h.metrics.add(&h.metrics.wsRejected)
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
 	h.mu.Lock()
 	if len(h.clients) >= h.cfg.WS.MaxConnections || h.perIP[ip] >= h.cfg.WS.MaxConnectionsPerIP {
 		h.mu.Unlock()
+		h.metrics.add(&h.metrics.wsRejected)
 		http.Error(w, "too many connections", http.StatusTooManyRequests)
 		return
 	}
@@ -105,6 +111,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
+	h.metrics.add(&h.metrics.wsConnects)
 	go c.writeLoop()
 	c.readLoop()
 }
@@ -146,7 +153,7 @@ func (c *wsClient) readLoop() {
 		if typ != websocket.TextMessage {
 			continue
 		}
-		if !c.hub.limiter.allow(c.ip.String(), 1) {
+		if ok, _, _ := c.hub.limiter.allow(c.ip.String(), 1); !ok {
 			c.reply(map[string]string{"error": "You are making requests too fast, please slow down!"})
 			continue
 		}
@@ -154,12 +161,27 @@ func (c *wsClient) readLoop() {
 	}
 }
 
+// wsRequest accepts both the node's own websocket protocol and NanoRPCProxy's:
+// subscribe/update/unsubscribe for the confirmation topic, plus ping.
 type wsRequest struct {
 	Action  string `json:"action"`
 	Topic   string `json:"topic"`
+	ID      any    `json:"id"`
 	Options *struct {
-		Accounts []any `json:"accounts"`
+		Accounts    []any `json:"accounts"`
+		AccountsAdd []any `json:"accounts_add"`
+		AccountsDel []any `json:"accounts_del"`
 	} `json:"options"`
+}
+
+// ack builds a reply like NanoRPCProxy and the node: the action, a timestamp,
+// and the client's id when it sent one, so clients can match replies.
+func ack(action, time string, id any) map[string]any {
+	m := map[string]any{"ack": action, "time": time}
+	if id != nil {
+		m["id"] = id
+	}
+	return m
 }
 
 func (c *wsClient) handle(data []byte) {
@@ -168,46 +190,61 @@ func (c *wsClient) handle(data []byte) {
 		return // old proxy silently ignored garbage too
 	}
 	h := c.hub
+	seconds := strconv.FormatInt(time.Now().Unix(), 10)
+	if m.Action == "ping" {
+		c.reply(ack("pong", strconv.FormatInt(time.Now().UnixMilli(), 10), m.ID))
+		return
+	}
+	if m.Topic != "confirmation" {
+		return
+	}
+	var add, del []any
+	if m.Options != nil {
+		add = append(m.Options.Accounts, m.Options.AccountsAdd...)
+		del = m.Options.AccountsDel
+	}
 	switch m.Action {
-	case "ping":
-		c.reply(map[string]any{"ack": "pong", "time": time.Now().UnixMilli()})
-	case "subscribe":
-		if m.Topic != "confirmation" {
-			return
-		}
-		if m.Options == nil || m.Options.Accounts == nil {
+	case "subscribe", "update":
+		if m.Action == "subscribe" && (m.Options == nil || m.Options.Accounts == nil) {
 			c.reply(map[string]string{"error": "You must provide the accounts to track via the options parameter"})
 			return
 		}
-		if len(m.Options.Accounts) > h.cfg.WS.MaxAccountsPerMessage {
-			c.reply(map[string]string{"error": "Too many accounts subscribed"})
+		if len(add)+len(del) > h.cfg.WS.MaxAccountsPerMessage {
+			c.reply(map[string]string{"error": fmt.Sprintf("Too many accounts in one message. Max is %d", h.cfg.WS.MaxAccountsPerMessage)})
 			return
 		}
-		valid := h.normalizeAccounts(m.Options.Accounts)
+		toAdd, toDel := h.normalizeAccounts(add), h.normalizeAccounts(del)
 		h.mu.Lock()
-		added := 0
-		for _, a := range valid {
-			if _, ok := c.accounts[a]; !ok {
-				added++
+		after := len(c.accounts)
+		for _, a := range toDel {
+			if _, ok := c.accounts[a]; ok {
+				after--
 			}
 		}
-		if len(c.accounts)+added > h.cfg.WS.MaxAccountsPerConnection {
+		seen := map[string]bool{}
+		for _, a := range toAdd {
+			if _, ok := c.accounts[a]; !ok && !seen[a] {
+				seen[a] = true
+				after++
+			}
+		}
+		if after > h.cfg.WS.MaxAccountsPerConnection {
 			h.mu.Unlock()
-			c.reply(map[string]string{"error": "Too many accounts subscribed"})
+			c.reply(map[string]string{"error": fmt.Sprintf("Too many accounts subscribed. Max is %d", h.cfg.WS.MaxAccountsPerConnection)})
 			return
 		}
-		for _, a := range valid {
+		for _, a := range toDel {
+			h.unsubLocked(c, a)
+		}
+		for _, a := range toAdd {
 			h.subLocked(c, a)
 		}
 		h.mu.Unlock()
-		c.reply(map[string]string{"ack": "subscribe"})
+		c.reply(ack(m.Action, seconds, m.ID))
 	case "unsubscribe":
-		if m.Topic != "confirmation" {
-			return
-		}
 		h.mu.Lock()
-		if m.Options != nil && len(m.Options.Accounts) > 0 {
-			for _, a := range h.normalizeAccounts(m.Options.Accounts) {
+		if len(add) > 0 {
+			for _, a := range h.normalizeAccounts(add) {
 				h.unsubLocked(c, a)
 			}
 		} else {
@@ -216,6 +253,7 @@ func (c *wsClient) handle(data []byte) {
 			}
 		}
 		h.mu.Unlock()
+		c.reply(ack("unsubscribe", seconds, m.ID))
 	}
 }
 
@@ -227,10 +265,7 @@ func (h *Hub) normalizeAccounts(in []any) []string {
 		if !ok || !validAddress(s, h.cfg.net) {
 			continue
 		}
-		if p := h.cfg.net.Prefixes[0]; !strings.HasPrefix(s, p) {
-			s = p + s[strings.IndexByte(s, '_')+1:]
-		}
-		out = append(out, s)
+		out = append(out, h.cfg.net.canonical(s))
 	}
 	return out
 }
@@ -342,7 +377,11 @@ func (h *Hub) runNode(ctx context.Context) {
 
 func (h *Hub) nodeSession(ctx context.Context) error {
 	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	conn, _, err := websocket.DefaultDialer.DialContext(dctx, h.cfg.WS.NodeURL, nil)
+	hdr := http.Header{}
+	for k, v := range h.cfg.NodeHeaders {
+		hdr.Set(k, v)
+	}
+	conn, _, err := websocket.DefaultDialer.DialContext(dctx, h.cfg.WS.NodeURL, hdr)
 	cancel()
 	if err != nil {
 		return err
@@ -442,6 +481,7 @@ func (h *Hub) fromNode(data []byte) {
 			seen[c] = true
 			c.enqueue(data)
 			h.forwarded.Add(1)
+			h.forwardedTotal.Add(1)
 		}
 	}
 }

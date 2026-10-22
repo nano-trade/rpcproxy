@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,10 +78,11 @@ func TestUnits(t *testing.T) {
 
 // fakeNode records what the proxy sends and answers like a node would.
 type fakeNode struct {
-	mu    sync.Mutex
-	got   []map[string]any
-	calls atomic.Int64
-	delay time.Duration
+	mu      sync.Mutex
+	got     []map[string]any
+	headers http.Header
+	calls   atomic.Int64
+	delay   time.Duration
 }
 
 func (f *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -90,6 +92,7 @@ func (f *fakeNode) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&m)
 	f.mu.Lock()
 	f.got = append(f.got, m)
+	f.headers = r.Header.Clone()
 	f.mu.Unlock()
 	switch m["action"] {
 	case "block_count":
@@ -123,7 +126,7 @@ func testProxy(t *testing.T, node http.Handler, mod func(*Config)) (*httptest.Se
 	if err := c.prepare(); err != nil {
 		t.Fatal(err)
 	}
-	ps := httptest.NewServer(newProxy(&c, newRateLimiter(c.RateLimit.PerSecond, c.RateLimit.Burst)).routes())
+	ps := httptest.NewServer(newProxy(&c, newRateLimiter(c.RateLimit.PerSecond, c.RateLimit.Burst), newMetrics()).routes())
 	t.Cleanup(ps.Close)
 	return ps, &c
 }
@@ -328,5 +331,114 @@ func TestBlocklist(t *testing.T) {
 	ps, _ := testProxy(t, &fakeNode{}, func(c *Config) { c.IPBlocklist = []string{"203.0.113.0/24"} })
 	if code, _, _ := get(t, ps.URL+"/proxy?action=block_count", "X-Real-IP", "203.0.113.9"); code != 403 {
 		t.Fatalf("blocked IP got %d", code)
+	}
+}
+
+func TestBlockedAccounts(t *testing.T) {
+	const burn = "nano_1111111111111111111111111111111111111111111111111111hifc8npp"
+	node := &fakeNode{}
+	ps, _ := testProxy(t, node, func(c *Config) {
+		c.Network = "nano"
+		c.AllowedActions = append(c.AllowedActions, "receivable", "accounts_receivable")
+		c.BlockedAccounts = []string{burn}
+	})
+	u := ps.URL + "/proxy"
+	before := node.calls.Load()
+	for _, q := range []string{
+		"?action=receivable&account=" + burn,
+		"?action=receivable&account=xrb_1111111111111111111111111111111111111111111111111111hifc8npp",
+		"?action=account_balance&account=NANO_1111111111111111111111111111111111111111111111111111HIFC8NPP",
+	} {
+		if code, body, _ := get(t, u+q); code != 403 || !strings.Contains(body, "Account not allowed") {
+			t.Errorf("%s: got %d %s", q, code, body)
+		}
+	}
+	if code, _ := post(t, u, `{"action":"accounts_receivable","accounts":["nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3","`+burn+`"]}`); code != 403 {
+		t.Errorf("accounts list with burn: %d", code)
+	}
+	if node.calls.Load() != before {
+		t.Error("blocked requests reached the node")
+	}
+	if code, _, _ := get(t, u+"?action=receivable&account=nano_3t6k35gi95xu6tergt6p69ck76ogmitsa8mnijtpxm9fkcm736xtoncuohr3"); code != 200 {
+		t.Errorf("normal account refused: %d", code)
+	}
+	c := defaultConfig()
+	c.AllowedActions = []string{"x"}
+	c.BlockedAccounts = []string{"ban_notanaddress"}
+	if c.prepare() == nil {
+		t.Error("invalid blocked account accepted")
+	}
+}
+
+func TestRateLimitHeaders(t *testing.T) {
+	ps, _ := testProxy(t, &fakeNode{}, func(c *Config) { c.RateLimit = RateLimit{PerSecond: 1, Burst: 2} })
+	u := ps.URL + "/proxy?action=block_count"
+	_, _, h := get(t, u, "X-Real-IP", "198.51.100.1")
+	if h.Get("X-RateLimit-Limit") != "2" || h.Get("X-RateLimit-Remaining") != "1" || h.Get("X-RateLimit-Reset") != "1" {
+		t.Fatalf("headers after 1st request: %v", h)
+	}
+	get(t, u, "X-Real-IP", "198.51.100.1")
+	code, _, h := get(t, u, "X-Real-IP", "198.51.100.1")
+	if code != 429 || h.Get("X-RateLimit-Remaining") != "0" || h.Get("Retry-After") != "1" {
+		t.Fatalf("3rd request: %d %v", code, h)
+	}
+}
+
+func TestNodeHeadersAndMetrics(t *testing.T) {
+	node := &fakeNode{}
+	ns := httptest.NewServer(node)
+	defer ns.Close()
+	c := defaultConfig()
+	c.NodeRPCURL = ns.URL
+	c.AllowedActions = []string{"block_count", "account_balance"}
+	c.CachedActions = map[string]int{"block_count": 30}
+	c.NodeHeaders = map[string]string{"Authorization": "Bearer secret"}
+	if err := c.prepare(); err != nil {
+		t.Fatal(err)
+	}
+	m := newMetrics()
+	ps := httptest.NewServer(newProxy(&c, newRateLimiter(1000, 1000), m).routes())
+	defer ps.Close()
+	get(t, ps.URL+"/proxy?action=block_count")
+	get(t, ps.URL+"/proxy?action=block_count")
+	get(t, ps.URL+"/proxy?action=wallet_create")
+	node.mu.Lock()
+	auth := node.headers.Get("Authorization")
+	node.mu.Unlock()
+	if auth != "Bearer secret" {
+		t.Errorf("node headers not sent, got %q", auth)
+	}
+
+	ms := httptest.NewServer(m.handler(&c, nil))
+	defer ms.Close()
+	_, body, h := get(t, ms.URL+"/metrics")
+	for _, want := range []string{
+		`rpcproxy_requests_total{action="block_count",result="ok"} 2`,
+		`rpcproxy_requests_total{action="_other",result="rejected"} 1`,
+		`rpcproxy_cache_hits_total 1`,
+		`rpcproxy_node_request_seconds_count{action="block_count"} 1`,
+		`rpcproxy_build_info{`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	if strings.Contains(body, "wallet_create") {
+		t.Error("disallowed action leaked into metric labels")
+	}
+	if !strings.HasPrefix(h.Get("Content-Type"), "text/plain") {
+		t.Error("wrong content type")
+	}
+}
+
+func TestOldConfigStillLoads(t *testing.T) {
+	f := t.TempDir() + "/c.json"
+	os.WriteFile(f, []byte(`{"allowed_actions":["block_count"],"disable_watch_work":true}`), 0o600)
+	if _, err := loadConfig(f); err != nil {
+		t.Fatalf("config with obsolete disable_watch_work rejected: %v", err)
+	}
+	os.WriteFile(f, []byte(`{"allowed_actions":["block_count"],"alowed_typo":1}`), 0o600)
+	if _, err := loadConfig(f); err == nil {
+		t.Fatal("unknown key accepted")
 	}
 }

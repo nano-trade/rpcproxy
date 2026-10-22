@@ -143,7 +143,7 @@ func TestWebsocket(t *testing.T) {
 	if err := c.prepare(); err != nil {
 		t.Fatal(err)
 	}
-	hub := newHub(&c, newRateLimiter(1000, 1000))
+	hub := newHub(&c, newRateLimiter(1000, 1000), newMetrics())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go hub.runNode(ctx)
@@ -196,7 +196,10 @@ func TestWebsocket(t *testing.T) {
 	node.waitFor(t, acctA)
 
 	// unsubscribe removes the rest
-	alice.WriteMessage(websocket.TextMessage, []byte(`{"action":"unsubscribe","topic":"confirmation"}`))
+	alice.WriteMessage(websocket.TextMessage, []byte(`{"action":"unsubscribe","topic":"confirmation","id":7}`))
+	if m := readMsg(t, alice); m["ack"] != "unsubscribe" || m["id"] != float64(7) {
+		t.Fatalf("unsubscribe ack: %v", m)
+	}
 	node.waitFor(t)
 
 	// per-IP connection limit (alice is still open, so 2 more fit, the 4th fails)
@@ -217,5 +220,59 @@ func TestWebsocket(t *testing.T) {
 	node.confirm(t, acctC, acctA)
 	if m := readMsg(t, alice); m["topic"] != "confirmation" {
 		t.Fatalf("after reconnect alice got %v", m)
+	}
+}
+
+// TestWebsocketUpdate covers the "update" action in both styles (node's
+// accounts_add/accounts_del and NanoRPCProxy's options.accounts) and ack ids.
+func TestWebsocketUpdate(t *testing.T) {
+	node := &fakeNodeWS{changed: make(chan struct{}, 100)}
+	ns := httptest.NewServer(node)
+	defer ns.Close()
+	c := defaultConfig()
+	c.AllowedActions = []string{"block_count"}
+	c.WS.Listen = "x"
+	c.WS.NodeURL = "ws" + strings.TrimPrefix(ns.URL, "http")
+	c.WS.MaxAccountsPerConnection = 2
+	if err := c.prepare(); err != nil {
+		t.Fatal(err)
+	}
+	hub := newHub(&c, newRateLimiter(1000, 1000), newMetrics())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.runNode(ctx)
+	hs := httptest.NewServer(hub)
+	defer hs.Close()
+	node.waitFor(t)
+	ws := dial(t, "ws"+strings.TrimPrefix(hs.URL, "http"))
+	send := func(v any) map[string]any {
+		b, _ := json.Marshal(v)
+		ws.WriteMessage(websocket.TextMessage, b)
+		return readMsg(t, ws)
+	}
+
+	m := send(map[string]any{"action": "subscribe", "topic": "confirmation", "id": "abc", "options": map[string]any{"accounts": []string{acctA}}})
+	if m["ack"] != "subscribe" || m["id"] != "abc" || m["time"] == nil {
+		t.Fatalf("subscribe ack: %v", m)
+	}
+	// node style: swap A for B
+	m = send(map[string]any{"action": "update", "topic": "confirmation", "options": map[string]any{"accounts_add": []string{acctB}, "accounts_del": []string{acctA}}})
+	if m["ack"] != "update" {
+		t.Fatalf("update ack: %v", m)
+	}
+	node.waitFor(t, acctB)
+	// NanoRPCProxy style: options.accounts adds
+	send(map[string]any{"action": "update", "topic": "confirmation", "options": map[string]any{"accounts": []string{acctC}}})
+	node.waitFor(t, acctB, acctC)
+	// a swap at the cap is fine, growing past it is not
+	if m = send(map[string]any{"action": "update", "topic": "confirmation", "options": map[string]any{"accounts_add": []string{acctA}, "accounts_del": []string{acctC}}}); m["ack"] != "update" {
+		t.Fatalf("swap at cap refused: %v", m)
+	}
+	if m = send(map[string]any{"action": "update", "topic": "confirmation", "options": map[string]any{"accounts_add": []string{acctC}}}); m["error"] == nil {
+		t.Fatalf("cap not enforced on update: %v", m)
+	}
+	node.waitFor(t, acctA, acctB)
+	if m = send(map[string]any{"action": "ping", "id": 5}); m["ack"] != "pong" || m["id"] != float64(5) {
+		t.Fatalf("ping: %v", m)
 	}
 }
