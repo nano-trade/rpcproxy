@@ -442,3 +442,17 @@ func TestOldConfigStillLoads(t *testing.T) {
 		t.Fatal("unknown key accepted")
 	}
 }
+
+func TestRootPageHidesRequestPath(t *testing.T) {
+	ps, _ := testProxy(t, &fakeNode{}, func(c *Config) { c.RequestPath = "/hard_to_guess_path" })
+	code, body, _ := get(t, ps.URL+"/")
+	if code != 200 || strings.Contains(body, "hard_to_guess") {
+		t.Fatalf("root page leaks the request path: %d %q", code, body)
+	}
+	if code, _, _ := get(t, ps.URL+"/proxy?action=block_count"); code != 404 {
+		t.Fatalf("default path should not work when a custom one is set: %d", code)
+	}
+	if code, _, _ := get(t, ps.URL+"/hard_to_guess_path?action=block_count"); code != 200 {
+		t.Fatalf("custom path broken: %d", code)
+	}
+}

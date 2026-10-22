@@ -76,8 +76,9 @@ func (p *Proxy) routes() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// never reveal request_path here: some operators use a hard-to-guess path
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "%s RPC proxy. Send requests to %s\n", p.cfg.net.Name, p.cfg.RequestPath)
+		fmt.Fprintf(w, "%s RPC proxy\n", p.cfg.net.Name)
 	})
 	return p.securityHeaders(mux)
 }
