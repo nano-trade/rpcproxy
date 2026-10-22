@@ -1,0 +1,83 @@
+{
+  "network": "nano",
+  "listen": "127.0.0.1:9960",
+  "request_path": "/proxy",
+  "node_rpc_url": "http://[::1]:7076",
+  "trusted_proxies": [
+    "127.0.0.1",
+    "::1"
+  ],
+  "real_ip_header": "X-Real-IP",
+  "allowed_actions": [
+    "account_history",
+    "account_info",
+    "account_balance",
+    "accounts_balances",
+    "account_key",
+    "account_representative",
+    "account_weight",
+    "accounts_frontiers",
+    "accounts_pending",
+    "active_difficulty",
+    "available_supply",
+    "block_account",
+    "block_info",
+    "block_count",
+    "block_create",
+    "block_confirm",
+    "block_count_type",
+    "blocks_info",
+    "chain",
+    "confirmation_quorum",
+    "delegators",
+    "delegators_count",
+    "frontiers",
+    "key_create",
+    "pending",
+    "pending_exists",
+    "process",
+    "representatives",
+    "representatives_online",
+    "sign",
+    "successors",
+    "mnano_to_raw",
+    "mnano_from_raw",
+    "work_validate",
+    "validate_account_number",
+    "version"
+  ],
+  "cached_actions": {
+    "block_count": 30,
+    "available_supply": 3600,
+    "active_difficulty": 30,
+    "representatives_online": 300
+  },
+  "limited_actions": {
+    "account_history": 500,
+    "chain": 500,
+    "frontiers": 500,
+    "pending": 500
+  },
+  "max_array_items": 500,
+  "max_body_bytes": 262144,
+  "rpc_timeout_seconds": 15,
+  "max_concurrent_node_requests": 64,
+  "rate_limit": {
+    "per_second": 20,
+    "burst": 40
+  },
+  "cors_origins": [],
+  "disable_watch_work": false,
+  "price_url": "",
+  "price_cache_seconds": 30,
+  "ip_blocklist": [],
+  "log_requests": false,
+  "websocket": {
+    "listen": "127.0.0.1:9962",
+    "node_url": "ws://[::1]:7078",
+    "max_connections": 5000,
+    "max_connections_per_ip": 20,
+    "max_accounts_per_message": 100,
+    "max_accounts_per_connection": 500
+  }
+}
