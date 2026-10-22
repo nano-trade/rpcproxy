@@ -1,67 +1,64 @@
 # rpcproxy
 
-A small, fast and hardened public proxy for **Banano** and **Nano** node RPC and
-websocket confirmations. It is a drop-in replacement for
-[NanoRPCProxy](https://github.com/Joohansson/NanoRPCProxy) (Node.js) for the
-public-facing parts that wallets such as Nault use, written in Go as a single
-static binary with two dependencies.
+[![CI](https://github.com/nano-trade/rpcproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/nano-trade/rpcproxy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## What it does
+A fast, hardened public gateway for **Banano** and **Nano** nodes. Put it in
+front of your node to safely offer RPC and live confirmations over websocket to
+wallets, explorers and bots.
 
-- **RPC** at `/proxy`: `GET /proxy?action=...` or `POST /proxy` with a JSON body.
-  Only actions in `allowed_actions` reach the node; everything else gets `403`.
-- **Websocket** for confirmations: clients subscribe to up to N accounts and
-  receive the node's confirmation messages for blocks sent from or to them.
-- **Extra actions** handled by the proxy itself: `price`, `mnano_to_raw`,
-  `mnano_from_raw` (using the right unit size for each network: Banano 10^29
-  raw, Nano 10^30 raw).
+It powers `api.banano.trade` and `ws2.banano.trade`, which serve
+[Nault for Banano](https://nault.banano.trade) among others. It is a drop-in
+replacement for [NanoRPCProxy](https://github.com/Joohansson/NanoRPCProxy),
+written in Go: a single 10 MB static binary with two dependencies.
+
+## Features
+
+- **RPC** at `/proxy`, via `GET /proxy?action=...` or `POST /proxy` with a JSON body.
+  Only actions on your allowlist ever reach the node.
+- **Websocket confirmations.** Clients subscribe to accounts and get the node's
+  confirmation messages for blocks sent from or to them. It speaks both the
+  node's protocol (`update` with `accounts_add`/`accounts_del`) and NanoRPCProxy's.
+- **Both networks** with correct units: Banano 1 BAN = 10^29 raw, Nano 1 XNO = 10^30 raw.
+  `mnano_to_raw`, `mnano_from_raw` and a configurable `price` action are answered by the proxy.
+- **Old and new action names**: `pending` and `receivable`, `accounts_pending` and `accounts_receivable`, and so on.
+- **Prometheus metrics** on a separate, private port.
+- **Docker image** and ready-built binaries for Linux (amd64, arm64, armv7), macOS and FreeBSD.
 
 ## Security
 
-- Per-client rate limiting (token bucket) on RPC and websocket messages. The real
-  client IP is only taken from `X-Real-IP` when the request comes from a trusted
-  proxy (nginx on localhost), so it can't be spoofed.
-- Request limits: body size, number of items in any array (`accounts`, `hashes`, …),
-  and a forced maximum `count` for heavy actions (`account_history`, `pending`, …).
-- Never forwards node responses larger than 32 MB; caps concurrent node requests.
-- HTTP timeouts on every phase (slowloris protection), security headers.
-- Websocket: per-IP and global connection caps, per-connection account cap,
-  64 KB message limit, ping/pong keepalive, slow clients get disconnected
-  instead of using memory, addresses validated including checksum.
-- The systemd unit runs it as a throwaway user with no write access to the
-  disk, no capabilities and a syscall filter (`systemd-analyze security` 1.2/10).
+| Threat | Protection |
+|---|---|
+| Wallet, control or other dangerous RPC calls | Action allowlist, unknown actions get `403` |
+| One client hogging the node | Per-IP token bucket on RPC and websocket messages, `X-RateLimit-*` headers |
+| Spoofed client IPs | Real-IP header only trusted from configured proxies (e.g. nginx on localhost) |
+| Huge requests | Body size limit, max items per array, forced max `count` on heavy actions |
+| Huge responses | Responses over 32 MB are dropped, concurrent node requests are capped |
+| Expensive accounts (e.g. the Nano burn address) | `blocked_accounts` refuses requests that name them |
+| Slowloris and idle connections | Timeouts on every phase of HTTP, websocket ping/pong |
+| Websocket abuse | Per-IP and global connection caps, per-connection account cap, 64 KB messages, address checksum validation, slow clients get disconnected |
+| A compromised proxy | systemd unit runs it as a throwaway user with no disk write access and a syscall filter (`systemd-analyze security`: 1.2) |
 
-## Differences from NanoRPCProxy
+## Quick start
 
-- Subscriptions are per websocket connection. The old proxy tracked them per IP,
-  which broke when many users came through the same IP (e.g. behind nginx or
-  Cloudflare, where everyone shared one entry).
-- The cache key includes the request parameters (the old one cached by action name only).
-- Unit conversions are correct for Banano.
-- Disallowed actions return `403` (was `500`); bad requests return `400`, rate
-  limits `429` with JSON `{"error": "..."}`.
-- Not included: the Nano token purchase system, basic-auth users, dPoW/BoomPoW
-  work delegation and the daily request-stat file. `work_generate` can still be
-  allowed and is then sent to the node.
-
-## Build
-
-Requires Go 1.26+.
+Download a release from the [releases page](https://github.com/nano-trade/rpcproxy/releases),
+or build it (Go 1.26+):
 
 ```sh
-go test -race ./...
-go install github.com/nano-trade/rpcproxy@latest   # or build from a clone:
-go build -trimpath -ldflags "-s -w -X main.version=1.0.0" -o rpcproxy .
+go install github.com/nano-trade/rpcproxy@latest
 ```
 
-## Run
+Then:
 
 ```sh
-./rpcproxy -check -config config.banano.json   # validate config
-./rpcproxy -config config.banano.json
+rpcproxy -check -config config.banano.json   # validate
+rpcproxy -config config.banano.json
+curl 'http://localhost:9950/proxy?action=block_count'
 ```
 
-On a server (one instance per network):
+### As a service (Linux, systemd)
+
+One instance per network: `rpcproxy@banano` reads `/etc/rpcproxy/banano.json`.
 
 ```sh
 install -m 755 rpcproxy /usr/local/bin/
@@ -70,52 +67,137 @@ mkdir -p /etc/rpcproxy && cp config.banano.json /etc/rpcproxy/banano.json
 systemctl daemon-reload && systemctl enable --now rpcproxy@banano
 ```
 
-For Nano, copy `config.nano.json` to `/etc/rpcproxy/nano.json` and enable
-`rpcproxy@nano`. Both can run side by side on different ports.
+For Nano, use `config.nano.json` as `/etc/rpcproxy/nano.json` and enable
+`rpcproxy@nano`. Both can run side by side.
 
-Behind nginx + Cloudflare, see `deploy/nginx-example.conf` and
-`deploy/update-cloudflare-ips` (restores visitor IPs and blocks requests that
-bypass Cloudflare). nginx must send `X-Real-IP`.
+### With Docker
 
-## Config
+```sh
+docker run -d --name rpcproxy --network host --restart unless-stopped \
+  -v /etc/rpcproxy/banano.json:/etc/rpcproxy/config.json:ro \
+  ghcr.io/nano-trade/rpcproxy:latest
+```
+
+Host networking lets the default `localhost` addresses reach the node and nginx
+just like a normal install. The image has no shell and runs as a non-root user.
+
+### Behind nginx and Cloudflare
+
+See [`deploy/nginx-example.conf`](deploy/nginx-example.conf). nginx must pass
+`X-Real-IP`, otherwise every visitor shares one rate limit.
+[`deploy/update-cloudflare-ips`](deploy/update-cloudflare-ips) generates the
+nginx config that restores visitor IPs from Cloudflare and lets you refuse
+requests that try to skip Cloudflare.
+
+## Using it
+
+### RPC
+
+```sh
+curl 'https://api.example.com/proxy?action=account_balance&account=ban_1...'
+curl -d '{"action":"accounts_balances","accounts":["ban_1...","ban_3..."]}' https://api.example.com/proxy
+```
+
+Arrays work in GET as `accounts[]=a&accounts[]=b`. Responses are the node's
+JSON unchanged. Errors are JSON `{"error": "..."}` with:
+
+| Status | Meaning |
+|---|---|
+| `400` | Malformed request, too many items |
+| `403` | Action not allowed, blocked IP or account |
+| `413` | Body too large |
+| `429` | Rate limited, see `Retry-After` |
+| `502` / `503` | Node unavailable or busy |
+
+Every RPC response carries `X-RateLimit-Limit` (burst size),
+`X-RateLimit-Remaining` and `X-RateLimit-Reset` (seconds until the full budget
+is back).
+
+### Websocket
+
+```json
+{"action":"subscribe","topic":"confirmation","id":"my-1","options":{"accounts":["ban_1..."]}}
+```
+→ `{"ack":"subscribe","time":"1792669909","id":"my-1"}`, then the node's
+confirmation messages for those accounts.
+
+| Message | Effect |
+|---|---|
+| `subscribe` with `options.accounts` | Adds accounts |
+| `update` with `options.accounts_add` / `accounts_del` (or `options.accounts`) | Adds and removes accounts |
+| `unsubscribe` | Removes all accounts, or only those in `options.accounts` |
+| `ping` | Replies `{"ack":"pong","time":"<ms>"}` |
+
+Every reply includes the `id` you sent, if any.
+
+### Metrics
+
+Set `metrics_listen` (e.g. `localhost:9958`) and scrape
+`http://localhost:9958/metrics` with Prometheus. It covers requests by action and
+result, node latency per action, cache hits, websocket clients, subscriptions,
+forwarded messages and whether the node websocket is up. Keep this port private;
+it is never served on the public RPC port.
+
+## Configuration
+
+Unknown keys are rejected, so typos are caught at startup.
 
 | Key | Meaning |
 |---|---|
 | `network` | `banano` or `nano`: address prefixes and unit size |
-| `listen` | RPC listen address, keep it on localhost behind nginx (`localhost:port` binds both 127.0.0.1 and ::1) |
+| `listen` | RPC address. `localhost:port` listens on both 127.0.0.1 and ::1 |
 | `request_path` | URL path for RPC (default `/proxy`) |
-| `node_rpc_url` | node RPC, e.g. `http://[::1]:7072` (Banano) / `:7076` (Nano) |
-| `trusted_proxies` | IPs/CIDRs allowed to set `real_ip_header` |
-| `allowed_actions` | RPC actions that are passed to the node |
-| `cached_actions` | action → seconds to cache (same parameters share a cache entry) |
-| `limited_actions` | action → maximum `count` |
-| `max_array_items` | max items in any array parameter |
-| `max_body_bytes` | max POST body size |
+| `node_rpc_url` | Node RPC, e.g. `http://[::1]:7072` (Banano) or `:7076` (Nano) |
+| `node_headers` | Extra headers for the node, e.g. `{"Authorization": "..."}` for a remote node |
+| `trusted_proxies` | IPs or CIDRs allowed to set `real_ip_header` |
+| `real_ip_header` | Header carrying the visitor IP (default `X-Real-IP`) |
+| `allowed_actions` | RPC actions passed to the node |
+| `cached_actions` | Action → seconds to cache. Identical requests share an entry and concurrent ones are merged |
+| `limited_actions` | Action → maximum `count` (missing or larger values are capped) |
+| `blocked_accounts` | Requests whose `account` or `accounts` name one of these get `403` |
+| `max_array_items` | Max items in any array parameter |
+| `max_body_bytes` | Max POST body size |
+| `rpc_timeout_seconds` | Node request timeout |
+| `max_concurrent_node_requests` | Requests in flight to the node at once |
 | `rate_limit` | `per_second` sustained and `burst` per client IP |
-| `max_concurrent_node_requests` | requests in flight to the node at once |
-| `cors_origins` | allowed browser origins, empty = any |
-| `disable_watch_work` | force `watch_work=false` on `process` |
-| `price_url` | JSON URL returned by the `price` action (empty disables it) |
-| `ip_blocklist` | IPs/CIDRs to refuse |
-| `log_requests` | log every request (otherwise a summary every 10 minutes) |
-| `websocket.listen` | websocket listen address, empty disables it |
-| `websocket.node_url` | node websocket, e.g. `ws://[::1]:7079` (Banano) / `:7078` (Nano) |
-| `websocket.max_*` | connection and subscription caps |
+| `cors_origins` | Allowed browser origins, empty means any |
+| `price_url` | JSON URL returned by the `price` action, empty disables it |
+| `price_cache_seconds` | How long to cache the price |
+| `ip_blocklist` | IPs or CIDRs to refuse |
+| `log_requests` | Log every request (otherwise a summary every 10 minutes) |
+| `metrics_listen` | Prometheus address, empty disables metrics |
+| `websocket.listen` | Websocket address, empty disables it |
+| `websocket.node_url` | Node websocket, e.g. `ws://[::1]:7079` (Banano) or `:7078` (Nano) |
+| `websocket.max_connections` | Total websocket connections |
+| `websocket.max_connections_per_ip` | Connections per visitor IP |
+| `websocket.max_accounts_per_message` | Accounts in one subscribe/update |
+| `websocket.max_accounts_per_connection` | Accounts one connection may watch |
 
-Unknown keys are rejected, so typos are caught at startup.
+## Coming from NanoRPCProxy
 
-## Websocket protocol
+Most clients need no change. Differences:
 
-```json
-{"action":"subscribe","topic":"confirmation","options":{"accounts":["ban_1..."]}}
+- Websocket subscriptions are tracked per connection. NanoRPCProxy tracks them
+  per IP, which mixes up users behind the same IP, and behind nginx or
+  Cloudflare that is everyone.
+- The cache key includes the request parameters.
+- Unit conversions are correct for Banano.
+- Disallowed actions return `403` instead of `500`.
+- Left out on purpose: the token purchase system, basic-auth users, dPoW/BoomPoW
+  work delegation and the daily stats file. `work_generate` can still be
+  allowlisted and is then handled by the node. `disable_watch_work` is accepted
+  but ignored, since nodes ignore `watch_work` since V22.
+
+## Development
+
+```sh
+go test -race ./...
+go vet ./...
 ```
-→ `{"ack":"subscribe"}`, then the node's confirmation messages for those accounts.
 
-```json
-{"action":"unsubscribe","topic":"confirmation"}
-```
-removes all accounts (or only those given in `options.accounts`).
-`{"action":"ping"}` → `{"ack":"pong","time":...}`.
+Releases: push a tag like `v1.2.0`. GitHub Actions builds the binaries, attaches
+them with checksums to a GitHub release, and publishes the multi-arch image to
+`ghcr.io/nano-trade/rpcproxy`.
 
 ## License
 

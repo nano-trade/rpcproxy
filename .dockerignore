@@ -1,0 +1,6 @@
+.git
+.github
+rpcproxy
+dist/
+*.md
+deploy/
